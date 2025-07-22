@@ -1,0 +1,134 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import skfuzzy as fuzz
+from skfuzzy import control as ctrl
+
+# Load datasets
+solar_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Objective functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+# Define fuzzy variables
+V_oc = ctrl.Antecedent(np.arange(85.54, 89.74, 0.01), 'V_oc')
+I_sc = ctrl.Antecedent(np.arange(2.34, 25.6784736, 0.1), 'I_sc')
+G_theta = ctrl.Antecedent(np.arange(120, 996, 2), 'G_theta')
+T = ctrl.Antecedent(np.arange(27, 35, 1), 'T')
+v = ctrl.Antecedent(np.arange(0.5, 22.3, 0.01), 'v')
+H = ctrl.Antecedent(np.arange(2, 3.01, 0.01), 'H')
+D = ctrl.Antecedent(np.arange(0.3, 0.36, 0.001), 'D')
+L = ctrl.Antecedent(np.arange(0.75, 1.11, 0.01), 'L')
+P_total = ctrl.Consequent(np.arange(0, 8000, 10), 'P_total')
+
+# Membership functions for inputs
+for var in [V_oc, I_sc, G_theta, T, v, H, D, L]:
+    var['low'] = fuzz.trimf(var.universe, [var.universe.min(), var.universe.min(), np.mean(var.universe)])
+    var['medium'] = fuzz.trimf(var.universe, [var.universe.min(), np.mean(var.universe), var.universe.max()])
+    var['high'] = fuzz.trimf(var.universe, [np.mean(var.universe), var.universe.max(), var.universe.max()])
+
+# Membership functions for output
+P_total['low'] = fuzz.trimf(P_total.universe, [0, 0, 3500])
+P_total['medium'] = fuzz.trimf(P_total.universe, [2500, 4500, 6500])
+P_total['high'] = fuzz.trimf(P_total.universe, [5500, 7500, 7500])
+
+# Fuzzy rules (simplified example, can be expanded)
+rules = [
+    ctrl.Rule(V_oc['high'] & I_sc['high'] & G_theta['high'] & T['low'], P_total['high']),
+    ctrl.Rule(V_oc['medium'] & I_sc['medium'] & G_theta['medium'] & T['medium'], P_total['medium']),
+    ctrl.Rule(V_oc['low'] | I_sc['low'] | G_theta['low'] | T['high'], P_total['low']),
+    ctrl.Rule(v['high'] & D['high'] & H['high'] & L['low'], P_total['high']),
+    ctrl.Rule(v['medium'] & D['medium'] & H['medium'], P_total['medium']),
+    ctrl.Rule(v['low'] | D['low'] | H['low'], P_total['low'])
+]
+
+# Control system
+power_ctrl = ctrl.ControlSystem(rules)
+power_simulator = ctrl.ControlSystemSimulation(power_ctrl)
+
+# Result storage
+fl_results = []
+
+# Optimization loop
+for idx, (solar_row, wind_row) in enumerate(zip(solar_df.itertuples(index=False), wind_df.itertuples(index=False))):
+    solar_series = pd.Series(solar_row._asdict())
+    wind_series = pd.Series(wind_row._asdict())
+
+    best_power = 0
+    best_config = {}
+
+    # Coarse brute-force sampling
+    for voc in np.linspace(70, 100, 5):
+        for isc in np.linspace(1, 20, 5):
+            for gth in [solar_series['G_theta']]:
+                for temp in [solar_series['T']]:
+                    for ws in [wind_series['v']]:
+                        for ht in [wind_series['H']]:
+                            for dia in [wind_series['D']]:
+                                for rod in [wind_series['L']]:
+
+                                    # Fuzzy logic estimation
+                                    power_simulator.input['V_oc'] = voc
+                                    power_simulator.input['I_sc'] = isc
+                                    power_simulator.input['G_theta'] = gth
+                                    power_simulator.input['T'] = temp
+                                    power_simulator.input['v'] = ws
+                                    power_simulator.input['H'] = ht
+                                    power_simulator.input['D'] = dia
+                                    power_simulator.input['L'] = rod
+
+                                    try:
+                                        power_simulator.compute()
+                                        fuzzy_output = power_simulator.output['P_total']
+
+                                        # Classical power calculation
+                                        solar_p = P_SOLAR(voc, isc, gth, temp)
+                                        wind_p = P_WIND(ws, dia, ht, rod)
+                                        actual_power = solar_p + wind_p
+
+                                        if actual_power > best_power:
+                                            best_power = actual_power
+                                            best_config = {
+                                                "V_oc_opt": voc, "I_sc_opt": isc,
+                                                "G_theta": gth, "T": temp,
+                                                "v": ws, "H": ht, "D": dia, "L": rod,
+                                            }
+
+                                    except:
+                                        continue
+
+    fl_results.append({
+        "Row_Index": idx,
+        **best_config,
+        "Max_P_TOTAL": best_power
+    })
+
+    print(f"[Row {idx}] → Max P_TOTAL: {best_power:.2f} W with config: {best_config}")
+
+# Save results
+fl_df = pd.DataFrame(fl_results)
+fl_df.to_csv("fl_optimization_results1.csv", index=False)
+fl_df.to_excel("fl_optimization_results1.xlsx", index=False)
+
+# Plot results
+plt.figure(figsize=(10, 6))
+plt.plot(fl_df["Row_Index"], fl_df["Max_P_TOTAL"], marker='o', linestyle='-', linewidth=2, label="Fuzzy Logic Optimized Power")
+plt.title("Fuzzy Logic Optimization")
+plt.xlabel("Row Index")
+plt.ylabel("Max Power Output (W)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("fl_optimized_power_curve1.svg", format="svg")
+plt.show()
