@@ -1,0 +1,146 @@
+import pandas as pd
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+
+# Load datasets
+solar_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/solar_panel_power_output.csv")
+wind_df = pd.read_csv("E:/Solar and Wind Integration/Third paper/wind_turbine_output.csv")
+
+# Constants
+T_ref, G_ref, R, r_s = 25, 1000, 0.700, 18.15
+k_V, k_I, eta, rho = -0.24, 0.04, 0.3, 1.225
+
+# Power functions
+def P_SOLAR(V_oc, I_sc, G_theta, T):
+    V_adj = V_oc - k_V * (T - T_ref)
+    I_adj = I_sc * (G_theta / G_ref) * (1 + k_I * (T - T_ref))
+    return V_adj * I_adj * (R / (R + r_s))
+
+def P_WIND(v, D, H, L):
+    return 4 * eta * 0.5 * rho * (v**3) * D * (H - (L / 2))
+
+def P_TOTAL(position: np.ndarray) -> float:
+    V_oc, I_sc, G_theta, T, v, H, D, L = position
+    power = P_SOLAR(V_oc, I_sc, G_theta, T) + P_WIND(v, D, H, L)
+    return -1 * power  # Negated for minimization
+
+# PSO parameters
+num_particles = 30
+num_iterations = 100
+inertia_weight = 0.5
+cognitive_coeff = 1.5
+social_coeff = 1.5
+
+# Variable bounds: [V_oc, I_sc, G_theta, T, v, H, D, L]
+bounds = [
+    (85.54, 89.74),    # V_oc
+    (2.34, 25.6784736),      # I_sc
+    (120, 996),  # G_theta
+    (27, 35),     # T
+    (0.5, 22.3),      # v
+    (2, 3.01),       # H
+    (0.3, 0.36),   # D
+    (0.75, 1.11)    # L
+]
+
+# Run PSO for entire dataset
+pso_results = []
+convergence_data = []
+
+for i in range(len(solar_df)):
+    # Initialize particles and velocities
+    particles = [np.array([random.uniform(*bounds[d]) for d in range(8)]) for _ in range(num_particles)]
+    velocities = [np.zeros(8) for _ in range(num_particles)]
+    personal_best_positions = particles.copy()
+    personal_best_scores = [float('inf')] * num_particles
+    global_best_position = None
+    global_best_score = float('inf')
+    curve = []
+
+    # Convergence check variables
+    convergence_threshold = 1e-6
+    stagnation_limit = 5
+    stagnation_counter = 0
+    previous_best = float('inf')
+    convergence_iteration = -1  # Default: not yet converged
+
+    # PSO iterations
+    for iter_no in range(num_iterations):
+        for j in range(num_particles):
+            score = P_TOTAL(particles[j])
+            if score < personal_best_scores[j]:
+                personal_best_scores[j] = score
+                personal_best_positions[j] = particles[j].copy()
+            if score < global_best_score:
+                global_best_score = score
+                global_best_position = particles[j].copy()
+
+        # Convergence tracking
+        if abs(previous_best - global_best_score) < convergence_threshold:
+            stagnation_counter += 1
+            if stagnation_counter >= stagnation_limit and convergence_iteration == -1:
+                convergence_iteration = iter_no
+        else:
+            stagnation_counter = 0
+        previous_best = global_best_score
+
+        # Update particles
+        for j in range(num_particles):
+            r1, r2 = random.random(), random.random()
+            cognitive = cognitive_coeff * r1 * (personal_best_positions[j] - particles[j])
+            social = social_coeff * r2 * (global_best_position - particles[j])
+            velocities[j] = inertia_weight * velocities[j] + cognitive + social
+            particles[j] += velocities[j]
+
+            # Apply bounds
+            for d in range(8):
+                particles[j][d] = max(bounds[d][0], min(bounds[d][1], particles[j][d]))
+
+        curve.append(-global_best_score)
+
+    # Store result and convergence info
+    result = {
+        "V_oc": global_best_position[0],
+        "I_sc": global_best_position[1],
+        "G_theta": global_best_position[2],
+        "T": global_best_position[3],
+        "v": global_best_position[4],
+        "H": global_best_position[5],
+        "D": global_best_position[6],
+        "L": global_best_position[7],
+        "Max_P_TOTAL": -global_best_score,
+        "Convergence_Iteration": convergence_iteration if convergence_iteration != -1 else num_iterations
+    }
+    pso_results.append(result)
+    convergence_data.append(curve)
+
+# Save results
+pso_df = pd.DataFrame(pso_results)
+pso_df.to_csv("pso_optimization_results_full_variables_with_convergence.csv", index=False)
+
+# === Final Plot: Average Convergence Curve with Marker ===
+# Compute average convergence curve
+average_curve = np.mean(convergence_data, axis=0)
+
+# Compute average convergence iteration
+valid_convergences = [res["Convergence_Iteration"] for res in pso_results if res["Convergence_Iteration"] is not None]
+average_convergence_iter = int(np.round(np.mean(valid_convergences)))
+
+# Plot the average curve and mark convergence
+plt.figure(figsize=(10, 6))
+plt.plot(average_curve, label='PSO Convergence', linewidth=2, color='blue')
+
+# Add convergence marker
+plt.axvline(x=average_convergence_iter, color='red', linestyle='--', label=f'Converged at Iteration {average_convergence_iter}')
+plt.text(average_convergence_iter + 1, average_curve[average_convergence_iter],
+         f'Iteration {average_convergence_iter}', color='red', fontsize=10, va='bottom')
+
+plt.title("PSO Convergence")
+plt.xlabel("Iteration")
+plt.ylabel("Total Power Output (W)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("pso_SW_avg_convergence_marked.svg", format="svg")
+plt.show()
